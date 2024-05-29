@@ -1,1 +1,1 @@
-# My Impl of Kaleidoscope
+# Impl of Kaleidoscope
