@@ -36,3 +36,6 @@
         1. left-hand side and right-hand side must have the same type
         2. result type must match the oper  and types
 3. For compare operator
+
+* github path : <a> https://github.com/hulintian/into_compiler </a>
+* refernece : <a> https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html </a>
