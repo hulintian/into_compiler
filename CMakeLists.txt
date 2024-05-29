@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(kaleidoscope)
 
+set(CMAKE_BUILD_TYPE "Debug")
+SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g2 -ggdb") # 定义Debug编译参数
+SET(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -O3 -Wall") # 定义Release编译参数
+
 set(CMAKE_CXX_STANDARD 14 CACHE STRING "")
 # set(CMAKE_VERBOSE_MAKEFILE ON)
 
