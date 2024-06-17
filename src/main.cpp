@@ -11,19 +11,40 @@
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
 
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+#include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IR/PassInstrumentation.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/Support/Error.h>
+
+#include <llvm/IR/PassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/StandardInstrumentations.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Support/TargetSelect.h>
+
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/Reassociate.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
 
 #include "parser.h"
 #include "lexer.h"
+#include "KaleidoscopeJIT.h"
 
 using namespace llvm;
+using namespace llvm::orc;
 using namespace kale;
 
 extern int CurTok;
@@ -38,8 +59,32 @@ static std::unique_ptr<Module> TheModule;
 static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, Value*> NamedValues;
 
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+static std::unique_ptr<FunctionPassManager> TheFPM;
+static std::unique_ptr<LoopAnalysisManager> TheLAM;
+static std::unique_ptr<FunctionAnalysisManager> TheFAM;
+static std::unique_ptr<CGSCCAnalysisManager> TheCGAM;
+static std::unique_ptr<ModuleAnalysisManager> TheMAM;
+static std::unique_ptr<PassInstrumentationCallbacks> ThePIC;
+static std::unique_ptr<StandardInstrumentations> TheSI;
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+static ExitOnError ExitOnErr;
+
 Value *LogErrorV(const char *Str) {
   LogError(Str);
+  return nullptr;
+}
+
+Function *getFunction(std::string Name) {
+  // First, see if the function has already been added to the current module.
+  if(auto *F = TheModule->getFunction(Name))
+    return F;
+
+  // If not , check whether we can codegen the declaration from some existing prototype.
+  auto FI = FunctionProtos.find(Name);
+  if(FI !=  FunctionProtos.end()) {
+    return FI->second->codegen();
+  }
   return nullptr;
 }
 
@@ -140,7 +185,12 @@ Function *FunctionAST::codegen() {
 
   if(Value *RetVal = Body->codegen()) {
     Builder->CreateRet(RetVal);
+
+    // Validate the generated code , checking for consistency
     verifyFunction(*TheFunction);
+
+    // Run the optimizer on the function .
+    TheFPM->run(*TheFunction, *TheFAM);
 
     return TheFunction;
   }
@@ -149,27 +199,59 @@ Function *FunctionAST::codegen() {
   return nullptr;
 }
 
-
-
-
-
 //===----------------------------------------------------------------------===//
 // Top-Level parsing and JIT Drive
 //===----------------------------------------------------------------------===//
 
-static void InitializeModule() {
+static void InitializeModuleAndManagers() {
+  // Open a new context and module.
   TheContext = std::make_unique<LLVMContext>();
   TheModule = std::make_unique<Module>("my cool jit", *TheContext);
 
+  // Create a new builder for the module
   Builder = std::make_unique<IRBuilder<>>(*TheContext);
+  
+  // Create new pass and analysis managers.
+  TheFPM = std::make_unique<FunctionPassManager>();
+  TheLAM = std::make_unique<LoopAnalysisManager>();
+  TheFAM = std::make_unique<FunctionAnalysisManager>();
+  TheCGAM = std::make_unique<CGSCCAnalysisManager>();
+  TheMAM = std::make_unique<ModuleAnalysisManager>();
+  ThePIC = std::make_unique<PassInstrumentationCallbacks>();
+  TheSI = std::make_unique<StandardInstrumentations>(true);
+
+  TheSI->registerCallbacks(*ThePIC, TheFAM.get());
+
+  // Add transform passes .
+  // Do simple "peepholoe" optimizations and bit-twiddling optzns.
+  TheFPM->addPass(InstCombinePass());
+  // Reassociate expressions.
+  TheFPM->addPass(ReassociatePass());
+  // Eliminate Common SubExpressions.
+  // need to create GVNPass to get The GVN pass
+  TheFPM->addPass(createGVNPass());
+  // Simplify the control flow graph (deleting unreachable blocks, etc).
+  TheFPM->addPass(SimplifyCFGPass());
+
+
+  // Register analysis passes used in these transform passes.
+  PassBuilder PB;
+  PB.registerModuleAnalyses(*TheMAM);
+  PB.registerFunctionAnalyses(*TheFAM);
+  PB.crossRegisterProxies(*TheLAM, *TheFAM, *TheCGAM, *TheMAM);
+
 }
 
 static void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
     if(auto *FnIR = FnAST->codegen()) {
-      fprintf(stderr, "Read function definition: ");
+      fprintf(stderr, "Read function definition: \n");
       FnIR->print(errs());
       fprintf(stderr, "\n");
+      ExitOnErr(TheJIT->addModule(
+        ThreadSafeModule(std::move(TheModule), std::move(TheContext))
+      ));
+      InitializeModuleAndManagers();
     }
   } else {
     // Skip token for error recovery.
@@ -180,9 +262,10 @@ static void HandleDefinition() {
 static void HandleExtern() {
   if (auto ProtoAST = ParseExtern()) {
     if(auto FnIR = ProtoAST->codegen()) {
-      fprintf(stderr, "Read extern: ");
+      fprintf(stderr, "Read extern: \n");
       FnIR->print(errs());
       fprintf(stderr, "\n");
+      FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
     }
   } else {
     // Skip token for error recovery.
@@ -193,10 +276,26 @@ static void HandleExtern() {
 static void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
   if (auto FnAST = ParseTopLevelExpr()) {
-    if(auto FnIR = FnAST->codegen()) {
-      fprintf(stderr, "Read top-level expression");
-      FnIR->print(errs());
-      fprintf(stderr, "\n");
+    if( FnAST->codegen()) {
+      // Create a ResourceTracker to track JIT'd memory allocated to our
+      // anonymous expression -- that way we can free it after executing.
+      auto RT = TheJIT->getMainJITDylib().createResourceTracker();
+
+      auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
+      ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
+      InitializeModuleAndManagers();
+
+      // Search the JIT for the __anon_expr symbol.
+      auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+
+      // Get the symbol's address and cast it to the right type (takes on arguments, returns a double)
+      // so we can call it as a native function.
+      auto addr = ExprSymbol.getAddress();
+      double (*FP)() = reinterpret_cast<double (*)()>(addr);
+      fprintf(stderr, "Evaluated to %f\n", FP());
+
+      // Delete the ananymous expression module from the JIT.
+      ExitOnErr(RT->remove());
     }
   } else {
     getNextToken();
@@ -227,10 +326,35 @@ static void MainLoop() {
 }
 
 //===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Main driver code.
 //===----------------------------------------------------------------------===//
 
 int main() {
+  InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  InitializeNativeTargetAsmParser();
   // Install standard binary operators.
   // 1 is lowest precedence.
   BinopPrecedence['<'] = 10;
@@ -242,7 +366,9 @@ int main() {
   fprintf(stderr, "ready> ");
   getNextToken();
 
-  InitializeModule();
+  TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+
+  InitializeModuleAndManagers();
 
   // Run the main "interpreter loop" now.
   MainLoop();

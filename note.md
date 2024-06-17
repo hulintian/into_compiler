@@ -39,3 +39,10 @@
 
 * github path : <a> https://github.com/hulintian/into_compiler </a>
 * refernece : <a> https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html </a>
+
+## LLVM IR 的内存模型
+
+
+
+## problem1
+![](imgs/p1.png)
