@@ -46,3 +46,13 @@
 
 ## problem1
 ![](imgs/p1.png)
+
+* 原因是llvm官方给的在FunctionAnalysisManager中添加GVNPass的方法变动了，应用下面这种方法添加GVNPass
+![](imgs/problem_of_gvn.png)、
+
+## problem2
+* 在编译过程中链接器报错
+* 解决方法是在cmake中加上要链接的库
+  ```cmake
+  llvm_map_components_to_libnames(llvm_libs core orcjit native)
+  ```

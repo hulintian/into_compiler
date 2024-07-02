@@ -21,6 +21,7 @@
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
+#include <llvm/Pass.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Support/TargetSelect.h>
 
@@ -207,12 +208,13 @@ static void InitializeModuleAndManagers() {
   // Open a new context and module.
   TheContext = std::make_unique<LLVMContext>();
   TheModule = std::make_unique<Module>("my cool jit", *TheContext);
+  TheModule->setDataLayout(TheJIT->getDataLayout());
 
   // Create a new builder for the module
   Builder = std::make_unique<IRBuilder<>>(*TheContext);
   
   // Create new pass and analysis managers.
-  TheFPM = std::make_unique<FunctionPassManager>();
+   TheFPM = std::make_unique<FunctionPassManager>();
   TheLAM = std::make_unique<LoopAnalysisManager>();
   TheFAM = std::make_unique<FunctionAnalysisManager>();
   TheCGAM = std::make_unique<CGSCCAnalysisManager>();
@@ -229,17 +231,15 @@ static void InitializeModuleAndManagers() {
   TheFPM->addPass(ReassociatePass());
   // Eliminate Common SubExpressions.
   // need to create GVNPass to get The GVN pass
-  TheFPM->addPass(createGVNPass());
+  TheFPM->addPass(GVN());
   // Simplify the control flow graph (deleting unreachable blocks, etc).
   TheFPM->addPass(SimplifyCFGPass());
-
 
   // Register analysis passes used in these transform passes.
   PassBuilder PB;
   PB.registerModuleAnalyses(*TheMAM);
   PB.registerFunctionAnalyses(*TheFAM);
   PB.crossRegisterProxies(*TheLAM, *TheFAM, *TheCGAM, *TheMAM);
-
 }
 
 static void HandleDefinition() {
