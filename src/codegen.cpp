@@ -1,8 +1,10 @@
 #include <cstddef>
 #include <llvm/ADT/APFloat.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constant.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <memory>
@@ -109,7 +111,7 @@ Value *BinaryExprAST::codegen() {
 }
 
 Value *CallExprAST::codegen() {
-  Function *CalleeF = TheModule->getFunction(Callee);
+  Function *CalleeF = getFunction(Callee);
 
   if(!CalleeF) {
     return LogErrorV("Unknown function referenced");
@@ -239,6 +241,80 @@ Value *IfExprAST::codegen() {
   return PN;
 }
 
+Value *ForExprAST::codegen() {
+  // emit the start code first, without 'vatiable' in scope
+  Value *StartVal = Start->codegen();
+  if(!StartVal) {
+    return nullptr;
+  }
+  Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  BasicBlock *PreheaderBB = Builder->GetInsertBlock();
+  BasicBlock *LoopBB = BasicBlock::Create(*TheContext, "loop", TheFunction);
+
+  // Insert an explicit fall through from the current block to the LoopBB.
+  Builder->CreateBr(LoopBB);
+
+  // start insertion in LoopBB
+  Builder->SetInsertPoint(LoopBB);
+
+  // Start the PHI node with an entry for Start
+  PHINode *Variable = Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, VarName);
+  Variable->addIncoming(StartVal, PreheaderBB);
+
+  // Within the loop, the variable is defined equal to the PHI node. If it shadows an existing variable, we have to restore it, so save it now
+  Value *OldVal = NamedValues[VarName];
+
+  /*
+    Emit the body of the loop. This, like any other expr,
+    can change the current BB. Note that we ignore the value computed by 
+    the body, but don't allow an error. 
+  */
+  if(!Body->codegen())
+    return nullptr;
+
+  // emit the step value
+  Value *StepVal = nullptr;
+  if(Step) {
+    StepVal = Step->codegen();
+    if(!StepVal) return nullptr;
+  } else {
+    StepVal = ConstantFP::get(*TheContext, APFloat(1.0));
+  }
+  
+  Value *NextVar = Builder->CreateFAdd(Variable, StepVal);
+
+  // Compute the end  condition.
+  Value *EndCond = End->codegen();
+  if(!EndCond) {
+    return nullptr;
+  }
+
+  // Convert condition to a bool by comparing non-equal to 0.0
+  EndCond = Builder->CreateFCmpONE(EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
+
+  // Create the "after loop" block an insert it.
+  BasicBlock *LoopEndBB = Builder->GetInsertBlock();
+  BasicBlock *AfterBB = BasicBlock::Create(*TheContext, "after loop", TheFunction);
+
+  // Insert the condition branch into the end of LoopEndBB.
+  Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+
+  // Any new code will be inserted in AfterBB.
+  Builder->SetInsertPoint(AfterBB);
+
+  // Add a new entry to the PHI node for the backedge.
+  Variable->addIncoming(NextVar, LoopEndBB);
+
+  // Restore the unshadowed variable.
+  if(OldVal) 
+    NamedValues[VarName] = OldVal;
+  else  
+    NamedValues.erase(VarName);
+
+  // for expr always returns 0.0
+  return Constant::getNullValue(Type::getDoubleTy(*TheContext));
+}
+
 //===----------------------------------------------------------------------===//
 // Top-Level parsing and JIT Drive
 //===----------------------------------------------------------------------===//
@@ -331,7 +407,7 @@ void HandleTopLevelExpression() {
       // so we can call it as a native function.
       auto addr = ExprSymbol.getAddress();
       double (*FP)() = reinterpret_cast<double (*)()>(addr);
-      fprintf(stderr, "Evaluated to %f\n", FP());
+      fprintf(stderr, "%f\n", FP());
 
       // Delete the ananymous expression module from the JIT.
       ExitOnErr(RT->remove());

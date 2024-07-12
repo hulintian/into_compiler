@@ -43,6 +43,11 @@
 ## LLVM IR 的内存模型
 
 
+## Use llvm 'opt' tool to generate CFG
+```sh
+llvm-as < t.ll | opt -passes=view-cfg
+```
+
 
 ## problem1
 ![](imgs/p1.png)
@@ -56,3 +61,31 @@
   ```cmake
   llvm_map_components_to_libnames(llvm_libs core orcjit native)
   ```
+
+## problem3
+* llvm kaleidoscope中写的extern的函数在链接时并没有加入符号表里
+  ```c++
+  #define DLLEXPORT
+  #endif
+
+  /// putchard - putchar that takes a double and returns 0.
+  extern "C" DLLEXPORT double putchard(double X) {
+    fputc((char)X, stderr);
+    return 0;
+  }
+
+  /// printd - printf that takes a double prints it as "%f\n", returning 0.
+  extern "C" DLLEXPORT double printd(double X) {
+    fprintf(stderr, "%f\n", X);
+    return 0;
+  }
+  ```
+  使用objdump -T 打印出可执行文件的符号表，里面并没有 *putchard* 和 *printd*
+* 解决方法：
+  * 在CMakeLists.txt中加上"-export-dynamic"，这样把主程序的所有符号都添加到符号表里了。
+    ```CMakeLists.txt
+    if(NOT LLVM_ENABLE_RTTI)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -export-dynamic")
+    endif()
+    ```
+  * 再查看符号表，表里有*putchard* 和 *printd*了。
