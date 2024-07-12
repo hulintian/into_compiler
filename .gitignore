@@ -2,4 +2,3 @@ build/
 .cache/
 tmp/
 bin/
-test/

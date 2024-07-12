@@ -16,8 +16,6 @@ namespace kale {
 
     std::unique_ptr<PrototypeAST> LogErrorP(const char *Str);
 
-
-
     std::unique_ptr<ExprAST> ParseExpression();
 
     /// numberexpr ::= number
